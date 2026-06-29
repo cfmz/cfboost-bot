@@ -2322,6 +2322,168 @@ async def handle_any_message(message: Message):
         await message.answer("👋 Привет! Ты автоматически зарегистрирован.\nНапиши /start, чтобы увидеть главное меню.", reply_markup=main_kb())
     else:
         await message.answer("❓ Используй кнопки меню или напиши /start")
+# =================================================================
+# ========== ИСПРАВЛЕНИЕ ФОТО И СОЗДАНИЯ ЗАДАНИЙ ==========
+# =================================================================
+
+# ---- ФОТО В РАЗДЕЛАХ ----
+# Все фото уже есть через send_with_photo в:
+# - menu_cmd → "menu"
+# - earn_cmd → "earn"
+# - more_cmd → "more"
+# - support_cmd → "support"
+# - stats_cmd → "stats"
+# - tasks_menu → "tasks"
+# - profile_cmd → "profile"
+# - elite_cmd → "elite"
+# - tariffs_cmd → "tariffs"
+# - referrals_cmd → "referrals"
+# - rating_cmd → "rating"
+# - transfer_cmd → "transfer"
+# - giveaway_cmd → "giveaway"
+# - promo_cmd → "promo"
+# - admin_cmd → "admin"
+
+# ---- ИСПРАВЛЕНИЕ СОЗДАНИЯ ЗАДАНИЯ ----
+@dp.callback_query(lambda c: c.data == "create_task")
+async def create_task_start(callback: CallbackQuery, state: FSMContext):
+    user = get_user(callback.from_user.id)
+    if not user:
+        create_user(callback.from_user.id, callback.from_user.username, callback.from_user.full_name)
+        user = get_user(callback.from_user.id)
+    if user[3] < 100:
+        await callback.answer("❌ Недостаточно монет! Минимум 100 монет.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Подписка", callback_data="task_type_subscribe")],
+        [InlineKeyboardButton(text="❤️ Лайк", callback_data="task_type_like")],
+        [InlineKeyboardButton(text="👁 Просмотр", callback_data="task_type_view")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="tasks_menu_back")]
+    ])
+    # Используем callback.message для отправки фото
+    await async_delete_message(callback.message.chat.id, callback.message.message_id)
+    await send_with_photo(callback.message, "create_task", "➕ Создание задания\n\nВыберите тип:", kb)
+    await state.set_state(TaskState.waiting_type)
+    await callback.answer()
+
+# ---- ИСПРАВЛЕНИЕ ВЫБОРА ТИПА ЗАДАНИЯ ----
+@dp.callback_query(lambda c: c.data.startswith("task_type_"))
+async def task_type_selected(callback: CallbackQuery, state: FSMContext):
+    task_type = callback.data.replace("task_type_", "")
+    await state.update_data(task_type=task_type)
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📎 Введите ссылку (канал, пост или видео):", back_btn("tasks_menu_back"))
+    await state.set_state(TaskState.waiting_link)
+    await callback.answer()
+
+# ---- ИСПРАВЛЕНИЕ ВВОДА ССЫЛКИ ----
+@dp.message(TaskState.waiting_link)
+async def task_link(message: Message, state: FSMContext):
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    await state.update_data(link=message.text)
+    await message.answer("📝 Введите описание задания (коротко):")
+    await state.set_state(TaskState.waiting_description)
+
+# ---- ИСПРАВЛЕНИЕ ВВОДА ОПИСАНИЯ ----
+@dp.message(TaskState.waiting_description)
+async def task_description(message: Message, state: FSMContext):
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    await state.update_data(description=html.escape(message.text))
+    await message.answer("👥 Введите количество исполнителей (1-1000):")
+    await state.set_state(TaskState.waiting_count)
+
+# ---- ИСПРАВЛЕНИЕ ВВОДА КОЛИЧЕСТВА ----
+@dp.message(TaskState.waiting_count)
+async def task_count(message: Message, state: FSMContext):
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    try:
+        count = int(message.text.strip())
+        if count < 1 or count > 1000:
+            await message.answer("❌ Введите число от 1 до 1000.")
+            return
+    except:
+        await message.answer("❌ Введите корректное число.")
+        return
+    await state.update_data(count=count)
+    data = await state.get_data()
+    task_type = data['task_type']
+    link = data['link']
+    description = data['description']
+    channel = extract_channel_from_link(link)
+    if not channel:
+        await message.answer("❌ Не удалось определить канал из ссылки. Убедитесь, что ссылка правильная.")
+        return
+    is_ok, msg = await check_bot_in_channel_async(channel)
+    if not is_ok:
+        await async_send_colored_keyboard(message.chat.id, f"❌ {msg}\n\n📌 Инструкция:\n1. Добавьте бота @{BOT_USERNAME} в канал @{channel}\n2. Дайте ему права администратора (минимум: 'Просмотр участников')\n3. После этого попробуйте снова", back_btn("tasks_menu_back"))
+        await state.clear()
+        return
+    prices = {'subscribe': 21, 'like': 5, 'view': 3}
+    price_per = prices.get(task_type, 21)
+    reward_per = 15 if task_type == 'subscribe' else 3 if task_type == 'like' else 1
+    total_cost = price_per * count
+    user = get_user(message.from_user.id)
+    if user[3] < total_cost:
+        await message.answer(f"❌ Недостаточно монет! Нужно {total_cost} монет.")
+        await state.clear()
+        return
+    text = f"📋 Подтверждение создания задания:\nТип: {task_type.capitalize()}\nСсылка: {link}\nОписание: {description}\nКоличество: {count}\nСтоимость за шт: {price_per} монет\nНаграда за шт: {reward_per} монет\nИтого: {total_cost} монет\n✅ {msg}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Создать", callback_data="task_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="task_cancel")]
+    ])
+    await async_send_colored_keyboard(message.chat.id, text, kb)
+    await state.set_state(TaskState.waiting_confirmation)
+
+# ---- ИСПРАВЛЕНИЕ ПОДТВЕРЖДЕНИЯ СОЗДАНИЯ ----
+@dp.callback_query(lambda c: c.data == "task_confirm")
+async def task_confirm(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    task_type = data['task_type']
+    link = data['link']
+    description = data['description']
+    count = data['count']
+    prices = {'subscribe': 21, 'like': 5, 'view': 3}
+    price_per = prices.get(task_type, 21)
+    reward_per = 15 if task_type == 'subscribe' else 3 if task_type == 'like' else 1
+    total_cost = price_per * count
+    user = get_user(user_id)
+    if user[3] < total_cost:
+        await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "❌ Недостаточно монет! Баланс изменился.", back_btn("main_menu"))
+        await state.clear()
+        await callback.answer()
+        return
+    update_balance(user_id, -total_cost, f"Создание задания: {task_type}", "spend")
+    cursor.execute("INSERT INTO tasks (creator_id, task_type, link, description, reward_per_unit, max_executors, is_elite) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (user_id, task_type, link, description, reward_per, count, 0))
+    conn.commit()
+    backup_db()
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "✅ Задание создано! Ожидайте исполнителей.", back_btn("main_menu"))
+    await state.clear()
+    await callback.answer()
+
+# ---- ИСПРАВЛЕНИЕ ОТМЕНЫ СОЗДАНИЯ ----
+@dp.callback_query(lambda c: c.data == "task_cancel")
+async def task_cancel(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "❌ Создание задания отменено.", back_btn("tasks_menu_back"))
+    await state.clear()
+    await callback.answer()
+
+# ---- ИСПРАВЛЕНИЕ НАЗАД В ЗАДАНИЯ ----
+@dp.callback_query(lambda c: c.data == "tasks_menu_back")
+async def tasks_menu_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await tasks_menu(callback.message)
+    await callback.answer()
 
 # ========== ЗАПУСК ==========
 async def main():
