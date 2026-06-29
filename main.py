@@ -1608,7 +1608,7 @@ async def more_my_executions(callback: CallbackQuery):
 async def more_back(callback: CallbackQuery):
     await more_cmd(callback.message)
     await callback.answer()
-# ========== АДМИН-ПАНЕЛЬ ==========
+# ========== АДМИН-ПАНЕЛЬ (ПОЛНАЯ И РАБОЧАЯ) ==========
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message):
     if not is_admin(message.from_user.id):
@@ -1622,6 +1622,595 @@ async def admin_cmd(message: Message):
         [InlineKeyboardButton(text="🔙 Выход", callback_data="admin_exit")]
     ])
     await send_with_photo(message, "admin", "⚙️ Админ-панель:", kb)
+
+# ---------- КАНАЛЫ ----------
+@dp.callback_query(lambda c: c.data == "admin_channels")
+@admin_only
+async def admin_channels(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Обязательные", callback_data="admin_required_channels")],
+        [InlineKeyboardButton(text="🪙 Спонсоры (Заработать)", callback_data="admin_earn_channels")],
+        [InlineKeyboardButton(text="👑 Спонсоры (Elite)", callback_data="admin_extra_channels")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📢 Управление каналами:\n\nВыберите тип:", kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_required_channels")
+@admin_only
+async def admin_required_channels(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM required_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    text = "📢 Обязательные каналы:\n\n"
+    if channels:
+        for ch_id, username, name in channels:
+            text += f"• {name} (@{username})\n"
+    else:
+        text += "Пока нет каналов."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="admin_add_required")],
+        [InlineKeyboardButton(text="➖ Удалить", callback_data="admin_remove_required")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_channels")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_add_required")
+@admin_only
+async def admin_add_required(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(channel_type="required")
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📝 Введите username канала (без @):", back_btn("admin_required_channels"))
+    await state.set_state(AdminState.waiting_channel_username)
+    await callback.answer()
+
+@dp.message(AdminState.waiting_channel_username)
+async def admin_channel_username(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    username = message.text.strip().replace('@', '')
+    await state.update_data(channel_username=username)
+    await message.answer("📝 Введите название канала (как будет отображаться):")
+    await state.set_state(AdminState.waiting_channel_name)
+
+@dp.message(AdminState.waiting_channel_name)
+async def admin_channel_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    name = message.text.strip()
+    data = await state.get_data()
+    username = data['channel_username']
+    channel_type = data.get('channel_type', 'required')
+    if channel_type == 'required':
+        cursor.execute("INSERT INTO required_channels (channel_username, channel_name) VALUES (?, ?)", (username, name))
+    elif channel_type == 'earn':
+        cursor.execute("INSERT INTO sponsor_earn_channels (channel_username, channel_name) VALUES (?, ?)", (username, name))
+    elif channel_type == 'extra':
+        cursor.execute("INSERT INTO sponsor_extra_channels (channel_username, channel_name) VALUES (?, ?)", (username, name))
+    conn.commit()
+    backup_db()
+    await message.answer(f"✅ Канал @{username} добавлен!")
+    await state.clear()
+    await admin_cmd(message)
+
+@dp.callback_query(lambda c: c.data == "admin_remove_required")
+@admin_only
+async def admin_remove_required(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM required_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    if not channels:
+        await callback.answer("❌ Нет каналов.", show_alert=True)
+        return
+    kb = []
+    for ch_id, username, name in channels:
+        kb.append([InlineKeyboardButton(text=f"🗑 {name} (@{username})", callback_data=f"admin_remove_required_{ch_id}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_required_channels")])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🗑 Выберите канал для удаления:", InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_remove_required_"))
+@admin_only
+async def admin_remove_required_confirm(callback: CallbackQuery):
+    ch_id = int(callback.data.replace("admin_remove_required_", ""))
+    cursor.execute("UPDATE required_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+    conn.commit()
+    backup_db()
+    await callback.answer("✅ Канал удалён!", show_alert=True)
+    await admin_required_channels(callback)
+
+@dp.callback_query(lambda c: c.data == "admin_earn_channels")
+@admin_only
+async def admin_earn_channels(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM sponsor_earn_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    text = "🪙 Спонсоры (Заработать):\n\n"
+    if channels:
+        for ch_id, username, name in channels:
+            text += f"• {name} (@{username})\n"
+    else:
+        text += "Пока нет каналов."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="admin_add_earn")],
+        [InlineKeyboardButton(text="➖ Удалить", callback_data="admin_remove_earn")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_channels")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_add_earn")
+@admin_only
+async def admin_add_earn(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(channel_type="earn")
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📝 Введите username канала (без @):", back_btn("admin_earn_channels"))
+    await state.set_state(AdminState.waiting_channel_username)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_remove_earn")
+@admin_only
+async def admin_remove_earn(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM sponsor_earn_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    if not channels:
+        await callback.answer("❌ Нет каналов.", show_alert=True)
+        return
+    kb = []
+    for ch_id, username, name in channels:
+        kb.append([InlineKeyboardButton(text=f"🗑 {name} (@{username})", callback_data=f"admin_remove_earn_{ch_id}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_earn_channels")])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🗑 Выберите канал для удаления:", InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_remove_earn_"))
+@admin_only
+async def admin_remove_earn_confirm(callback: CallbackQuery):
+    ch_id = int(callback.data.replace("admin_remove_earn_", ""))
+    cursor.execute("UPDATE sponsor_earn_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+    conn.commit()
+    backup_db()
+    await callback.answer("✅ Канал удалён!", show_alert=True)
+    await admin_earn_channels(callback)
+
+@dp.callback_query(lambda c: c.data == "admin_extra_channels")
+@admin_only
+async def admin_extra_channels(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM sponsor_extra_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    text = "👑 Спонсоры (Elite):\n\n"
+    if channels:
+        for ch_id, username, name in channels:
+            text += f"• {name} (@{username})\n"
+    else:
+        text += "Пока нет каналов."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="admin_add_extra")],
+        [InlineKeyboardButton(text="➖ Удалить", callback_data="admin_remove_extra")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_channels")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_add_extra")
+@admin_only
+async def admin_add_extra(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(channel_type="extra")
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📝 Введите username канала (без @):", back_btn("admin_extra_channels"))
+    await state.set_state(AdminState.waiting_channel_username)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_remove_extra")
+@admin_only
+async def admin_remove_extra(callback: CallbackQuery):
+    cursor.execute("SELECT id, channel_username, channel_name FROM sponsor_extra_channels WHERE is_active = 1")
+    channels = cursor.fetchall()
+    if not channels:
+        await callback.answer("❌ Нет каналов.", show_alert=True)
+        return
+    kb = []
+    for ch_id, username, name in channels:
+        kb.append([InlineKeyboardButton(text=f"🗑 {name} (@{username})", callback_data=f"admin_remove_extra_{ch_id}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_extra_channels")])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🗑 Выберите канал для удаления:", InlineKeyboardMarkup(inline_keyboard=kb))
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_remove_extra_"))
+@admin_only
+async def admin_remove_extra_confirm(callback: CallbackQuery):
+    ch_id = int(callback.data.replace("admin_remove_extra_", ""))
+    cursor.execute("UPDATE sponsor_extra_channels SET is_active = 0 WHERE id = ?", (ch_id,))
+    conn.commit()
+    backup_db()
+    await callback.answer("✅ Канал удалён!", show_alert=True)
+    await admin_extra_channels(callback)
+
+# ---------- ПРОМОКОДЫ ----------
+@dp.callback_query(lambda c: c.data == "admin_promocodes")
+@admin_only
+async def admin_promocodes(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin_list_promo")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🎟 Управление промокодами:", kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_create_promo")
+@admin_only
+async def admin_create_promo(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📝 Введите код промокода (латиница, цифры):", back_btn("admin_promocodes"))
+    await state.set_state(AdminState.waiting_promo_code)
+    await callback.answer()
+
+@dp.message(AdminState.waiting_promo_code)
+async def admin_promo_code(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    code = message.text.strip().upper()
+    await state.update_data(promo_code=code)
+    await message.answer("💰 Введите бонус (количество монет):")
+    await state.set_state(AdminState.waiting_promo_bonus)
+
+@dp.message(AdminState.waiting_promo_bonus)
+async def admin_promo_bonus(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    try:
+        bonus = int(message.text.strip())
+    except:
+        await message.answer("❌ Введите число.")
+        return
+    await state.update_data(promo_bonus=bonus)
+    await message.answer("👥 Введите лимит использований (0 = безлимит):")
+    await state.set_state(AdminState.waiting_promo_uses)
+
+@dp.message(AdminState.waiting_promo_uses)
+async def admin_promo_uses(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    try:
+        max_uses = int(message.text.strip())
+    except:
+        await message.answer("❌ Введите число.")
+        return
+    data = await state.get_data()
+    code = data['promo_code']
+    bonus = data['promo_bonus']
+    try:
+        cursor.execute("INSERT INTO promocodes (code, bonus, max_uses, created_by) VALUES (?, ?, ?, ?)", (code, bonus, max_uses, ADMIN_ID))
+        conn.commit()
+        backup_db()
+        await message.answer(f"✅ Промокод {code} создан! Бонус: {bonus} монет, лимит: {max_uses if max_uses > 0 else '∞'}")
+    except sqlite3.IntegrityError:
+        await message.answer(f"❌ Промокод {code} уже существует.")
+    await state.clear()
+    await admin_cmd(message)
+
+@dp.callback_query(lambda c: c.data == "admin_list_promo")
+@admin_only
+async def admin_list_promo(callback: CallbackQuery):
+    cursor.execute("SELECT id, code, bonus, max_uses, used_count, is_active FROM promocodes")
+    promos = cursor.fetchall()
+    if promos:
+        text = "📋 Список промокодов:\n\n"
+        for pid, code, bonus, max_uses, used, is_active in promos:
+            status = "✅ Активен" if is_active else "❌ Неактивен"
+            text += f"• {code}: {bonus} монет (использован {used}/{max_uses if max_uses > 0 else '∞'}) - {status}\n"
+    else:
+        text = "📋 Пока нет промокодов."
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, back_btn("admin_promocodes"))
+    await callback.answer()
+
+# ---------- ПОЛЬЗОВАТЕЛИ ----------
+@dp.callback_query(lambda c: c.data == "admin_users")
+@admin_only
+async def admin_users(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Найти пользователя", callback_data="admin_find_user")],
+        [InlineKeyboardButton(text="💰 Выдать монеты", callback_data="admin_give_coins")],
+        [InlineKeyboardButton(text="💸 Забрать монеты", callback_data="admin_take_coins")],
+        [InlineKeyboardButton(text="💎 Выдать Elite", callback_data="admin_give_elite")],
+        [InlineKeyboardButton(text="💎 Забрать Elite", callback_data="admin_take_elite")],
+        [InlineKeyboardButton(text="🚫 Заблокировать", callback_data="admin_ban_user")],
+        [InlineKeyboardButton(text="🔓 Разблокировать", callback_data="admin_unban_user")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "👤 Управление пользователями:", kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_give_elite")
+@admin_only
+async def admin_give_elite(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "💎 Введите ID пользователя для выдачи Elite Sub:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="give_elite")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_take_elite")
+@admin_only
+async def admin_take_elite(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "💎 Введите ID пользователя для забора Elite Sub:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="take_elite")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_give_coins")
+@admin_only
+async def admin_give_coins(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "💰 Введите ID пользователя:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="give_coins")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_take_coins")
+@admin_only
+async def admin_take_coins(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "💸 Введите ID пользователя:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="take_coins")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_find_user")
+@admin_only
+async def admin_find_user(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🔍 Введите ID пользователя:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="find_user")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_ban_user")
+@admin_only
+async def admin_ban_user(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🚫 Введите ID пользователя для блокировки:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="ban_user")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_unban_user")
+@admin_only
+async def admin_unban_user(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "🔓 Введите ID пользователя для разблокировки:", back_btn("admin_users"))
+    await state.set_state(AdminState.waiting_user_id)
+    await state.update_data(action="unban_user")
+    await callback.answer()
+
+@dp.message(AdminState.waiting_user_id)
+async def admin_user_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    try:
+        user_id = int(message.text.strip())
+    except:
+        await message.answer("❌ Введите корректный ID.")
+        return
+    user = get_user(user_id)
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        await state.clear()
+        return
+    await state.update_data(target_user_id=user_id)
+    data = await state.get_data()
+    action = data.get('action')
+    if action == "give_coins":
+        await message.answer("💰 Введите количество монет для выдачи:")
+        await state.set_state(AdminState.waiting_user_amount)
+    elif action == "take_coins":
+        await message.answer("💸 Введите количество монет для забора:")
+        await state.set_state(AdminState.waiting_user_amount)
+    elif action == "give_elite":
+        until = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE users SET elite_sub_until = ? WHERE user_id = ?", (until, user_id))
+        conn.commit()
+        backup_db()
+        await message.answer(f"✅ Elite Sub выдана пользователю {user_id} на 30 дней!")
+        await state.clear()
+        await admin_cmd(message)
+    elif action == "take_elite":
+        cursor.execute("UPDATE users SET elite_sub_until = NULL WHERE user_id = ?", (user_id,))
+        conn.commit()
+        backup_db()
+        await message.answer(f"✅ Elite Sub забрана у пользователя {user_id}!")
+        await state.clear()
+        await admin_cmd(message)
+    elif action == "ban_user":
+        cursor.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        backup_db()
+        await message.answer(f"✅ Пользователь {user_id} заблокирован!")
+        await state.clear()
+        await admin_cmd(message)
+    elif action == "unban_user":
+        cursor.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
+        backup_db()
+        await message.answer(f"✅ Пользователь {user_id} разблокирован!")
+        await state.clear()
+        await admin_cmd(message)
+    elif action == "find_user":
+        text = f"👤 Пользователь: {user[0]}\n📛 Username: @{user[1] if user[1] else 'Нет'}\n💰 Баланс: {format_number(user[3])} баллов\n💸 Потрачено: {format_number(user[4])} баллов\n👥 Рефералов: {user[8]}\n💎 Elite: {'✅ Активна' if is_elite_active(user[0]) else '❌ Не активна'}\n🚫 Забанен: {'✅ Да' if user[12] else '❌ Нет'}"
+        await async_send_colored_keyboard(message.chat.id, text, back_btn("admin_users"))
+        await state.clear()
+
+@dp.message(AdminState.waiting_user_amount)
+async def admin_user_amount(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    try:
+        amount = int(message.text.strip())
+    except:
+        await message.answer("❌ Введите число.")
+        return
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    action = data.get('action', '')
+    if action == "give_coins":
+        update_balance(user_id, amount, f"Выдано админом: {amount} монет", "admin")
+        await message.answer(f"✅ {amount} монет выдано пользователю {user_id}!")
+    elif action == "take_coins":
+        update_balance(user_id, -amount, f"Забрано админом: {amount} монет", "admin")
+        await message.answer(f"✅ {amount} монет забрано у пользователя {user_id}!")
+    await state.clear()
+    await admin_cmd(message)
+
+# ---------- РАССЫЛКА ----------
+@dp.callback_query(lambda c: c.data == "admin_broadcast")
+@admin_only
+async def admin_broadcast(callback: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Всем пользователям", callback_data="admin_broadcast_all")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📨 Рассылка:\n\nВыберите тип:", kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_broadcast_all")
+@admin_only
+async def admin_broadcast_all(callback: CallbackQuery, state: FSMContext):
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, "📝 Введите текст рассылки:", back_btn("admin_broadcast"))
+    await state.set_state(AdminState.waiting_broadcast_text)
+    await callback.answer()
+
+@dp.message(AdminState.waiting_broadcast_text)
+async def admin_broadcast_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if message.text in ["🔙 Главное меню", "🔙 Назад"]:
+        await state.clear()
+        await message.answer("🔙 Главное меню:", reply_markup=main_kb())
+        return
+    text = message.text
+    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = cursor.fetchall()
+    success = 0
+    fail = 0
+    await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
+    for user in users:
+        try:
+            await bot.send_message(user[0], text)
+            success += 1
+            await asyncio.sleep(0.05)
+        except:
+            fail += 1
+    await message.answer(f"✅ Рассылка завершена!\n📨 Отправлено: {success}\n❌ Не доставлено: {fail}")
+    await state.clear()
+    await admin_cmd(message)
+
+# ---------- СТАТИСТИКА ----------
+@dp.callback_query(lambda c: c.data == "admin_stats")
+@admin_only
+async def admin_stats(callback: CallbackQuery):
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 0")
+    total = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+    banned = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM task_executions WHERE is_verified = 1")
+    tasks = cursor.fetchone()[0]
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE type = 'earn'")
+    earned = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT SUM(amount) FROM transactions WHERE type = 'spend'")
+    spent = cursor.fetchone()[0] or 0
+    cursor.execute("SELECT COUNT(*) FROM users WHERE elite_sub_until IS NOT NULL")
+    elite = cursor.fetchone()[0]
+    text = f"📊 ПОЛНАЯ СТАТИСТИКА\n👥 Всего пользователей: {total}\n🚫 Забанено: {banned}\n💎 Elite Sub: {elite}\n📋 Выполнено заданий: {format_number(tasks)}\n💰 Всего заработано: {format_number(earned)} баллов\n💸 Всего потрачено: {format_number(spent)} баллов"
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, back_btn("admin_back"))
+    await callback.answer()
+
+# ---------- НАСТРОЙКИ ----------
+@dp.callback_query(lambda c: c.data == "admin_settings")
+@admin_only
+async def admin_settings(callback: CallbackQuery):
+    text = "💰 Настройки бота:\n📱 Telegram цены:\n• Подписка: 21₿ (покупка) / 15₿ (награда)\n• Лайк: 5₿ / 3₿\n• Просмотр: 3₿ / 1.5₿\n💎 Elite Sub: 25,000₿ или 25⭐\n🎁 Спонсор награда: 3,500₿\n💸 Комиссия перевода: 2%"
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, back_btn("admin_back"))
+    await callback.answer()
+
+# ---------- РОЗЫГРЫШ ----------
+@dp.callback_query(lambda c: c.data == "admin_giveaway")
+@admin_only
+async def admin_giveaway(callback: CallbackQuery):
+    text = "🏆 Управление розыгрышем:\n• Розыгрыш проводится каждую неделю\n• Победители: 1 место - 10,000 монет, 2 место - 5,000, 3 место - 3,000\n• Топ обновляется в реальном времени\n• Сброс каждый понедельник в 00:00"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Запустить вручную", callback_data="admin_run_giveaway")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_run_giveaway")
+@admin_only
+async def admin_run_giveaway(callback: CallbackQuery):
+    cursor.execute("SELECT user_id, referrals_weekly FROM users WHERE is_banned = 0 AND referrals_weekly > 0 ORDER BY referrals_weekly DESC LIMIT 3")
+    winners = cursor.fetchall()
+    if len(winners) < 3:
+        await callback.answer("❌ Недостаточно участников для розыгрыша (нужно минимум 3).", show_alert=True)
+        return
+    prizes = [10000, 5000, 3000]
+    text = "🏆 РЕЗУЛЬТАТЫ РОЗЫГРЫША:\n\n"
+    for i, (user_id, refs) in enumerate(winners):
+        user = get_user(user_id)
+        name = f"@{user[1]}" if user[1] else f"ID: {user_id}"
+        text += f"{['🥇', '🥈', '🥉'][i]} {name} — {refs} рефералов\n"
+        update_balance(user_id, prizes[i], f"Розыгрыш: {['1 место', '2 место', '3 место'][i]}", "bonus")
+        cursor.execute("INSERT INTO giveaway_winners (user_id, place, reward) VALUES (?, ?, ?)", (user_id, i+1, prizes[i]))
+    conn.commit()
+    backup_db()
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, back_btn("admin_back"))
+    await callback.answer()
+
+# ---------- ЗАДАНИЯ ----------
+@dp.callback_query(lambda c: c.data == "admin_tasks")
+@admin_only
+async def admin_tasks(callback: CallbackQuery):
+    cursor.execute("SELECT id, creator_id, task_type, link, status, current_executors, max_executors FROM tasks ORDER BY id DESC LIMIT 10")
+    tasks = cursor.fetchall()
+    if tasks:
+        text = "📋 Последние задания:\n\n"
+        for task in tasks:
+            task_id, creator_id, task_type, link, status, current, max_exec = task
+            text += f"• #{task_id} {task_type}: {link[:30]}...\n  Статус: {status} | {current}/{max_exec} | Создатель: {creator_id}\n\n"
+    else:
+        text = "📋 Заданий пока нет."
+    await async_edit_colored_keyboard(callback.message.chat.id, callback.message.message_id, text, back_btn("admin_back"))
+    await callback.answer()
+
+# ---------- НАЗАД ----------
+@dp.callback_query(lambda c: c.data == "admin_back")
+@admin_only
+async def admin_back(callback: CallbackQuery):
+    await admin_cmd(callback.message)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_exit")
+@admin_only
+async def admin_exit(callback: CallbackQuery):
+    await async_delete_message(callback.message.chat.id, callback.message.message_id)
+    await callback.message.answer("🔙 Главное меню:", reply_markup=main_kb())
+    await callback.answer()
 
 # ---------- КАНАЛЫ ----------
 @dp.callback_query(lambda c: c.data == "admin_channels")
